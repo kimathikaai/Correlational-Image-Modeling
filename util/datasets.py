@@ -6,12 +6,14 @@
 # --------------------------------------------------------
 
 import os
+import csv
 import warnings
 warnings.simplefilter("ignore", UserWarning)
 import PIL
 import torch
 import random
 import math
+from enum import Enum
 import numpy as np
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
@@ -22,7 +24,10 @@ from torch import Tensor
 from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as F
+from torch.utils.data import Dataset
 
+from glob import glob
+from pathlib import Path
 
 class Cutout(object):
     """Randomly mask out one or more patches from an image.
@@ -288,6 +293,269 @@ def revise_box(corners, mask_nonzeros, degree):
             else:
                 revise_corners.append(br_corner)
     return revise_corners
+
+import Image
+
+class DatasetType(Enum):
+    """
+    Used to differentiate between expected data structures
+    """
+
+    CSV = 0
+    CLASSIFICATION = 1
+    # Uses indicators in the filenames to split
+    FILENAME = 2
+
+def pil_image_loader(path: str) -> Image.Image:
+    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
+    with open(path, "rb") as f:
+        img = Image.open(f)
+        return img.convert("RGB")
+
+def read_paths_csv(csv_path: str) -> List[str]:
+    """
+    Given a csv of paths, read them as a comma separated row
+    """
+    path_list = []
+
+    with open(csv_path, "r") as file:
+        csvreader = csv.reader(file)
+        for row in csvreader:
+            path_list.extend(row)
+
+    print(f"Read {len(path_list)} filenames from {csv_path}")
+
+    return path_list
+
+
+def get_file_stem(path_list: List[str]):
+    """
+    Remove the exensions from file name and return the
+    extension free file name. This function is required
+    because some file names include '.'
+    which naively splitting based on '.' on file names
+    without extensions will produce non existent filenames
+    """
+    _path_list = []
+    for path in path_list:
+        if Path(path).suffix in [".png", ".jpg", ".bmp", ".tif", ".tiff"]:
+            _path_list.append(Path(path).stem)
+        else:
+            _path_list.append(Path(path).name)
+
+    return _path_list
+    
+class PretrainDataset(Dataset):
+    """
+    Base dataset for pre-training
+    """
+
+    def __init__(self, images_list, transform):
+        super().__init__()
+        self.images_list = images_list
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.images_list)
+
+    def __getitem__(self, index):
+        path = self.images_list[index]
+        sample = pil_image_loader(path)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
+    
+class CorrlationDataset2(Dataset):
+
+    def __init__(
+        self,
+        images_list,
+        search_size=224,
+        context_size=176,
+        template_size=64,
+        template_num=6,
+        scale=(0.2, 1.0),
+        ratio=(1.0, 1.0),
+        degree=45,
+        interpolation=InterpolationMode.BICUBIC,
+        transform=None,
+    ):
+
+        super(CorrlationDataset, self).__init__()
+
+        self.images_list = images_list
+        self.search_size = search_size
+        self.context_size = context_size
+        self.template_size = template_size
+        self.template_num = template_num
+        self.scale = scale
+        self.ratio = ratio
+        self.degree = degree
+        self.interpolation = interpolation
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.images_list)
+
+    def __getitem__(self, index):
+        path = self.images_list[index]
+        image = pil_image_loader(path)
+        # path, _ = self.samples[index]
+        # image = self.loader(path)
+        
+        search_image = self.transform["search"](image)
+
+        masks = []
+        template_images = []
+        for _ in range(self.template_num):
+            degree = torch.randint(-self.degree, self.degree, size=(1,)).item()
+            H, W = search_image.size
+            i, j, h, w = get_params(search_image, self.scale, self.ratio)
+            
+            tmp_mask_img = torch.ones(1, H, W).type(torch.uint8)
+            tmp_mask_img[:, i:i+h,j:j+w] = 2
+
+            rotate_search_img  = F.rotate(search_image, degree, expand=1)
+            rotate_mask_img  = F.rotate(tmp_mask_img, degree, expand=1)
+
+            region_mask = rotate_mask_img == 2
+            mask = rotate_mask_img.squeeze(0)
+            mask_nonzeros = mask.nonzero()
+
+            region_nonzeros = (mask == 2).nonzero()
+            x1, x2 = region_nonzeros[:, 0].min().item(), region_nonzeros[:, 0].max().item()
+            y1, y2 = region_nonzeros[:, 1].min().item(), region_nonzeros[:, 1].max().item()
+
+            corners = [(x1, y1), (x1, y2), (x2, y1), (x2, y2)] # top_left, top_right, bottom_left, bottom_right
+
+            revise_corners = revise_box(corners, mask_nonzeros, degree)
+            x1_r, y1_r = revise_corners[0]
+            x2_r, y2_r = revise_corners[3]
+            i_r, j_r, h_r, w_r = xyxy_to_xywh([x1_r, y1_r, x2_r, y2_r])
+            template_image = F.resized_crop(rotate_search_img, i_r, j_r, h_r, w_r, (self.template_size, self.template_size), self.interpolation)
+            
+            rotate_mask_img[:, x1_r:x2_r+1, y1_r:y2_r+1] = 3
+
+            reverse_search_img  = F.rotate(rotate_search_img, -degree, expand=0)
+            reverse_mask_img  = F.rotate(rotate_mask_img, -degree, expand=0)
+
+            reverse_mask_img_nonzeros = reverse_mask_img.squeeze(0).nonzero()
+
+            x1_rr, x2_rr = reverse_mask_img_nonzeros[:, 0].min().item(), reverse_mask_img_nonzeros[:, 0].max().item()
+            y1_rr, y2_rr = reverse_mask_img_nonzeros[:, 1].min().item(), reverse_mask_img_nonzeros[:, 1].max().item()
+
+            i_rr, j_rr, h_rr, w_rr = xyxy_to_xywh([x1_rr, y1_rr, x2_rr, y2_rr])
+            
+            crop_search_img = F.resized_crop(reverse_search_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+            crop_mask_img = F.resized_crop(reverse_mask_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+
+            region_mask = crop_mask_img == 3
+            mask_ = torch.zeros(1, self.context_size, self.context_size).to(torch.int64)
+            mask_.masked_fill_(region_mask, 1)
+            masks.append(mask_[0])
+            template_images.append(template_image)
+
+        context_image = F.resize(search_image, (self.context_size, self.context_size), self.interpolation)
+        context_image = self.transform["post_context"](context_image)
+
+        temp_images = []
+        for template_image in template_images:
+            if self.transform["common"]:
+                template_image = self.transform["common"](template_image)
+            if self.transform["template"]:
+                template_image = self.transform["template"](template_image)
+            template_image = self.transform["post_template"](template_image)
+            temp_images.append(template_image)
+
+        return context_image, temp_images, masks
+    
+def get_custom_pretrain_dataset(image_directory_list: List[str], split_name, transform,search_size,context_size,template_size,template_num,scale,ratio,degree):
+    # Assumes that the split csv file is in the same directory as the image data
+
+    # for each directory find the split csv file
+    # then get the full paths of the images in that csv file
+    # the assert that the number of collected and viable paths is the same as the csv List
+    # output the number of files used from this directory
+
+    # then extend a larger list of files that will be used to create the dataset
+
+    sample_paths = []
+
+    for img_dir in image_directory_list:
+        assert os.path.exists(img_dir), "DNE: {}".format(img_dir)
+        csv_path = os.path.join(img_dir, f"{split_name}.csv")
+        included_paths = read_paths_csv(csv_path)
+        included_paths_stems = get_file_stem(included_paths)
+        file_paths = glob(os.path.join(img_dir, "*"))
+        _sample_paths = [x for x in file_paths if Path(x).stem in included_paths_stems]
+        _sample_stems = [Path(x).stem for x in _sample_paths]
+        # validate filtering
+        print(
+            f"[info] Path differences: {set(_sample_stems).symmetric_difference(set(included_paths_stems))}"
+        )
+        assert len(included_paths) == len(
+            _sample_paths
+        ), f"{len(_sample_paths) = }, {len(included_paths) = }"
+        print(f"[info] Loading {len(_sample_paths) = } from {img_dir}")
+        sample_paths.extend(_sample_paths)
+
+    print(f"[info] Using {len(sample_paths) = } total files")
+    return CorrlationDataset2(images_list=sample_paths, transform = transform,search_size = search_size,context_size = context_size,template_size = template_size,template_num=template_num,scale=scale,ratio=ratio,degree=degree)
+
+
+def get_classification_pretrain_dataset(image_directory_list: List[str], transform,search_size,context_size,template_size,template_num,scale,ratio,degree):
+    # validate directory existence and get images
+    sample_paths = []
+    for img_dir in image_directory_list:
+        assert os.path.exists(img_dir), "DNE: {}".format(img_dir)
+        files = glob(os.path.join(img_dir, "*"))
+        sample_paths.extend(files)
+
+    # sort based on file names
+    sample_paths = sorted(sample_paths, key=lambda x: Path(x).stem)
+    print(f"Found {len(sample_paths) = } images")
+
+    return CorrlationDataset2(images_list=sample_paths, search_size= search_size,context_size=context_size,template_size=template_size,template_num=template_num,scale = scale,ratio = ratio,degree = degree,transform=transform)
+
+
+def get_filename_pretrain_dataset(dataset: CorrlationDataset2, split_name):
+    assert split_name in ["train", "val", "test"]
+    orig_len = len(dataset)
+    dataset.images_list = [
+        x for x in dataset.images_list if split_name in x and ".csv" not in x
+    ]
+    print(f"{orig_len = }, {len(dataset) = }")
+    return dataset
+
+def get_pretrain_dataset(
+    image_directory_list: List[str],
+    directory_type: DatasetType,
+    transform,
+    search_size,
+    context_size,
+    template_size,
+    template_num,
+    scale,
+    ratio, #(3.0 / 4.0, 4.0 / 3.0),
+    degree,
+    split_name=None
+) -> CorrlationDataset2:
+    """
+    Returns an initialized PretrainDataset
+    """
+    # Get the full paths
+    image_directory_list = [
+        os.path.abspath(os.path.expanduser(x)) for x in image_directory_list
+    ]
+
+    if directory_type == DatasetType.CSV:
+        return get_custom_pretrain_dataset(image_directory_list, split_name, transform,search_size,context_size,template_size,template_num,scale,ratio,degree)
+    elif directory_type == DatasetType.CLASSIFICATION:
+        return get_classification_pretrain_dataset(image_directory_list, transform,search_size,context_size,template_size,template_num,scale,ratio,degree)
+    elif directory_type == DatasetType.FILENAME:
+        dataset = get_classification_pretrain_dataset(image_directory_list, transform,search_size,context_size,template_size,template_num,scale,ratio,degree)
+        return get_filename_pretrain_dataset(dataset, split_name)
+
 
 
 class CorrlationDataset(datasets.ImageFolder):

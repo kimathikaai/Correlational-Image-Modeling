@@ -139,8 +139,21 @@ class CorrelationBlockV0(nn.Module):
         return x_, t_
 
 
-class CorrelationBlockV1(nn.Module):
+# Convolutional block 
+class ConvBlock(nn.Module):
+    def __init__(self,in_channels,out_channels, kernel_size=3, stride=1, padding=1):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
 
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
+    
+class CorrelationBlockV1(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()

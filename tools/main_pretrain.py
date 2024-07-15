@@ -26,7 +26,7 @@ import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from util.datasets import GaussianBlur, Solarization, Cutout
+from util.datasets import GaussianBlur, Solarization, Cutout,CorrlationDataset,CorrlationDataset2, get_pretrain_dataset,DatasetType
 
 
 def get_args_parser():
@@ -95,6 +95,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument("--directory_type", type=str, choices=[x.name for x in DatasetType], default=DatasetType.FILENAME.name)
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
@@ -194,19 +195,31 @@ def main(args):
     
 
     if args.gear == "cim":
-        dataset_train = CorrlationDataset(
-            os.path.join(args.data_path, 'train'),
-            search_size=args.input_size,
-            context_size=args.context_size,
-            template_size=args.template_size,
-            template_num=args.template_num,
-            scale=(args.template_min_scale, args.template_max_scale),
-            ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
-            degree=args.rotaton_max_degree,
-            transform=transform_train
-        )
-    else:
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        # dataset_train = CorrlationDataset2(
+        #     os.path.join(args.data_path, 'train'),
+        #     search_size=args.input_size,
+        #     context_size=args.context_size,
+        #     template_size=args.template_size,
+        #     template_num=args.template_num,
+        #     scale=(args.template_min_scale, args.template_max_scale),
+        #     ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+        #     degree=args.rotaton_max_degree,
+        #     transform=transform_train
+        # )
+        dataset_train = get_pretrain_dataset(
+        image_directory_list=args.data_dirs,
+        directory_type=args.directory_type,
+        split_name="train",
+        search_size=args.input_size,
+        context_size=args.context_size,
+        template_size=args.template_size,
+        template_num=args.template_num,
+        scale=(args.template_min_scale, args.template_max_scale),
+        ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+        degree=args.rotaton_max_degree,
+        transform=transform_train)
+    # else:
+    #     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
 
     print(dataset_train)
 
@@ -330,6 +343,7 @@ def main(args):
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
+    args.directory_type = DatasetType[args.directory_type]
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
