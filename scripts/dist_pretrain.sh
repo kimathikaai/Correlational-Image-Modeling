@@ -4,11 +4,15 @@ set -x
 
 GPU_NUM=$1
 PORT=$2
-DATA=$3
-GEAR=$4
-MODEL_NAME=$5
-RESUME=$6
-JOB_NAME=$7
+# DATA=$3
+# "[USAGE] sh scripts/dist_pretrain.sh <GPU_NUM> <PORT> <GEAR> <MODEL> <RESUME> <JOB_NAME>"
+GEAR=$3
+MODEL_NAME=$4
+RESUME=$5
+JOB_NAME=$6
+
+log_dir="cim-pretraining/logs"
+data_dir="data"
 
 EPOCHS=300
 WEPOCHS=40
@@ -63,19 +67,18 @@ else
 fi
 
 
-EXPS='exps'
+EXPS=$log_dir
 if ! [ -d "$EXPS/$JOB_NAME" ]; then
    mkdir -p $EXPS/$JOB_NAME
 fi
 
 
-EXT_FLAGS="$EXT_FLAGS --batch_size 256 --accum_iter 2"
+EXT_FLAGS="$EXT_FLAGS --batch_size 128 --accum_iter 2"
 
 
 
-IMAGENET_DIR=$DATA
-
-
+# IMAGENET_DIR=$DATA
+export CUDA_VISIBLE_DEVICES=4
 export PYTHONPATH=./:$PYTHONPATH
 OMP_NUM_THREADS=1 torchrun --master_addr 127.0.0.1 --master_port $PORT --nproc_per_node $GPU_NUM \
     tools/main_pretrain.py \
@@ -86,7 +89,7 @@ OMP_NUM_THREADS=1 torchrun --master_addr 127.0.0.1 --master_port $PORT --nproc_p
             --model $MODEL \
             --epochs $EPOCHS \
             --warmup_epochs $WEPOCHS \
-            --data_path ${IMAGENET_DIR} \
+            --data_dirs "$data_dir/CVC-ClinicDB/Images" "$data_dir/CVC-ColonDB/Images" "$data_dir/ETIS-LaribPolypDB/Images" "$data_dir/Kvasir-SEG/Images" \
             $EXT_FLAGS \
         2>&1 | tee $EXPS/$JOB_NAME/$JOB_NAME.log > /dev/null & 
 

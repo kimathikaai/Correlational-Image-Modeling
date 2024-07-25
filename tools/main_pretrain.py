@@ -26,7 +26,8 @@ import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from util.datasets import GaussianBlur, Solarization, Cutout
+from util.datasets import DatasetType, GaussianBlur, Solarization, Cutout,CorrlationDataset, get_pretrain_dataset
+
 
 
 def get_args_parser():
@@ -37,7 +38,9 @@ def get_args_parser():
     parser.add_argument('--save_per_epochs', default=10, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-
+    # parser.add_argument('--config', help='path to configuration file')
+    parser.add_argument("--wandb_project", type=str, default='ssl-pretraining', help='Wandb project name')
+    parser.add_argument("--wandb_team", type=str, default='critical-ml-dg', help='Wandb team name')
     # Model parameters
     parser.add_argument('--gear', default='mae', type=str, metavar='GEAR',
                         help='Name of gear to train')
@@ -95,6 +98,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument("--data_dirs", metavar='DIR', nargs='+', help='Folder(s) containing image data', required=True)
+    parser.add_argument("--directory_type", type=str, choices=[x.name for x in DatasetType], default=DatasetType.FILENAME.name)
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
@@ -194,17 +199,31 @@ def main(args):
     
 
     if args.gear == "cim":
-        dataset_train = CorrlationDataset(
-            os.path.join(args.data_path, 'train'),
-            search_size=args.input_size,
-            context_size=args.context_size,
-            template_size=args.template_size,
-            template_num=args.template_num,
-            scale=(args.template_min_scale, args.template_max_scale),
-            ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
-            degree=args.rotaton_max_degree,
-            transform=transform_train
-        )
+
+        dataset_train = get_pretrain_dataset(
+        image_directory_list=args.data_dirs,
+        directory_type=args.directory_type,
+        split_name="train",
+        search_size=args.input_size,
+        context_size=args.context_size,
+        template_size=args.template_size,
+        template_num=args.template_num,
+        scale=(args.template_min_scale, args.template_max_scale),
+        ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+        degree=args.rotaton_max_degree,
+        transform=transform_train)
+        
+        # dataset_train = CorrlationDataset(
+        #     os.path.join(args.data_path, 'train'),
+        #     search_size=args.input_size,
+        #     context_size=args.context_size,
+        #     template_size=args.template_size,
+        #     template_num=args.template_num,
+        #     scale=(args.template_min_scale, args.template_max_scale),
+        #     ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+        #     degree=args.rotaton_max_degree,
+        #     transform=transform_train
+        # )
     else:
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
 
@@ -219,10 +238,26 @@ def main(args):
         print("Sampler_train = %s" % str(sampler_train))
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
-
+    import wandb
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = SummaryWriter(log_dir=args.log_dir)
+        wandb.init(
+            name=args.run_id,
+            project=args.wandb_project,
+            entity=args.wandb_team,
+            dir=args.run_log_dir,
+            tags=["pretrain"],
+        )
+         # Add hyperparameters to config
+        wandb.config.update({"hyper-parameters": vars(args)})
+        # wandb.config.update({"config_file": cfg})
+        # define our custom x axis metric
+        wandb.define_metric("step")
+        # define which metrics will be plotted against it (e.g. all metrics
+        # under 'train')
+        wandb.define_metric("train/*", step_metric="step")
+        wandb.define_metric("learning_rate", step_metric="step")
     else:
         log_writer = None
 
@@ -301,6 +336,9 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
+        if global_rank ==0:
+            wandb.log({"epoch": epoch})
+            wandb.log({"learning_rate": args.lr})
         # import pdb; pdb.set_trace()
         train_stats = train_one_epoch(
             model, data_loader_train,
@@ -308,6 +346,7 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
+        
         if args.output_dir and (epoch % args.save_per_epochs == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
@@ -330,6 +369,7 @@ def main(args):
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
+    args.directory_type = DatasetType[args.directory_type]
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
