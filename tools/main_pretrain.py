@@ -12,6 +12,7 @@ import numpy as np
 import os
 import time
 from pathlib import Path
+from torchvision.models import vit_b_16
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -34,6 +35,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Self-Supervised Image Modeling Pre-Training', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
+    parser.add_argument("--run_id", required=True, type=str, help='Unique identifier for a run')
     parser.add_argument('--epochs', default=400, type=int)
     parser.add_argument('--save_per_epochs', default=10, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
@@ -128,6 +130,7 @@ def get_args_parser():
     parser.add_argument(
         "--port", default=None, type=str, help="port used to set up distributed training"
     )
+    parser.add_argument("--using_imagenet_weights",default=True,type=bool)
     return parser
 
 
@@ -246,7 +249,7 @@ def main(args):
             name=args.run_id,
             project=args.wandb_project,
             entity=args.wandb_team,
-            dir=args.run_log_dir,
+            dir=args.log_dir,
             tags=["pretrain"],
         )
          # Add hyperparameters to config
@@ -289,6 +292,19 @@ def main(args):
             sigma_cont=args.sigma_cont,
             sigma_corr=args.sigma_corr,
         )
+        if args.using_imagenet_weights:
+            vit_model =  timm.create_model('vit_base_patch16_224', pretrained=True)
+    
+            # Extract the relevant layers from ViT
+            patch_embed = vit_model.patch_embed
+            blocks = vit_model.blocks
+            norm = vit_model.norm
+        
+            # Assign pretrained weights to CIM's ViT backbone
+            model.patch_embed.load_state_dict(patch_embed.state_dict())
+            model.blocks.load_state_dict(blocks.state_dict())
+            model.norm.load_state_dict(norm.state_dict())
+            
     else:
         raise ValueError("Not supported type of gear: {}!".format(args.gear))
 
@@ -354,6 +370,11 @@ def main(args):
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,}
+        
+        for k,v in train_stats.items():
+            if k == "loss":
+                 if global_rank == 0:
+                    wandb.log({"train/loss_step": v})
 
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
