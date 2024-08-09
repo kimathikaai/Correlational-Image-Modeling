@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-echo "[USAGE] sh scripts/dist_pretrain.sh <GPU_NUM> <PORT> <DATA> <GEAR> <MODEL> <RESUME> <JOB_NAME>"
+echo "[USAGE] sh scripts/dist_pretrain.sh <GPU_NUM> <PORT> <GEAR> <MODEL> <RESUME>"
 set -x
 
 GPU_NUM=$1

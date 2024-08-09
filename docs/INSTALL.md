@@ -12,6 +12,8 @@ conda activate cim
 
 # Install requirements
 conda install pytorch torchvision cudatoolkit=11.3 -c pytorch -y
+conda install -c conda-forge -c nvidia cudatoolkit=11.3
+conda install -c conda-forge cudnn=8
 
 
 # Clone CIM
